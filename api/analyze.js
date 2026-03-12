@@ -1,29 +1,67 @@
+import { GoogleGenAI } from "@google/genai";
+
+const ai = new GoogleGenAI({
+  apiKey: process.env.GEMINI_API_KEY,
+});
+
 export default async function handler(req, res) {
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' })
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const apiKey = process.env.ANTHROPIC_API_KEY
-  if (!apiKey) {
-    return res.status(500).json({ error: 'ANTHROPIC_API_KEY not configured on server.' })
+  if (!process.env.GEMINI_API_KEY) {
+    return res.status(500).json({ error: "GEMINI_API_KEY not configured." });
   }
 
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
+    const { messages } = req.body || {};
+
+    if (!messages?.[0]?.content || !Array.isArray(messages[0].content)) {
+      return res.status(400).json({ error: "Invalid request body." });
+    }
+
+    const userContent = messages[0].content;
+
+    // Convert your existing frontend payload into Gemini parts
+    const parts = userContent.map((item) => {
+      if (item.type === "text") {
+        return { text: item.text };
+      }
+
+      if (item.type === "image") {
+        return {
+          inlineData: {
+            mimeType: item.source.media_type,
+            data: item.source.data, // raw base64 only
+          },
+        };
+      }
+
+      return null;
+    }).filter(Boolean);
+
+    const response = await ai.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: [
+        {
+          role: "user",
+          parts,
+        },
+      ],
+      config: {
+        temperature: 0.1,
       },
-      body: JSON.stringify(req.body),
-    })
+    });
 
-    const data = await response.json()
-    return res.status(response.status).json(data)
+    const text = response.text || "{}";
 
+    return res.status(200).json({
+      content: [{ type: "text", text }],
+    });
   } catch (err) {
-    console.error('Anthropic proxy error:', err)
-    return res.status(500).json({ error: err.message })
+    console.error("Gemini proxy error:", err);
+    return res.status(500).json({
+      error: err.message || "Gemini request failed",
+    });
   }
 }
