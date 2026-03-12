@@ -44,40 +44,55 @@ const G = {
 
 const AI_PROMPT = `You are analyzing document page images to find ALL locations where a signature should be placed.
 
-STRICT RULE:
-A valid signature location exists whenever BOTH of these are present in the same block:
-1. A closing/label text such as:
-   - Regards,
-   - Sincerely,
-   - Best regards,
-   - Respectfully,
-   - Very truly yours,
-   - Yours truly,
-   - Approved By:
-   - Prepared By:
-   - Noted By:
-   - Authorized By:
-   - Submitted By:
-   - Certified By:
-   - For Approval:
-2. A printed person name below that text
+GOAL:
+Determine the signature box by COMPUTING it from the full page measurements and the positions of:
+1. a label/closing text
+2. the printed name below it
 
-PLACEMENT RULE:
-- The signature must be placed STRICTLY between the closing/label text and the printed name.
-- If the gap is large, fill most of the area between them.
-- If the gap is small, still place the box between them and allow the lower part of the box to overlap the printed name slightly.
-- NEVER reject a valid signing block just because the gap is small.
-- The printed name is the anchor for signature placement.
-- The box should be horizontally aligned to the printed name.
-- The top of the box should start below the closing/label text.
-- The bottom of the box may touch or slightly overlap the printed name.
-- If multiple signing blocks exist, return all of them.
+VALID LABELS / CLOSINGS:
+- Regards,
+- Sincerely,
+- Best regards,
+- Respectfully,
+- Very truly yours,
+- Yours truly,
+- Approved By:
+- Prepared By:
+- Noted By:
+- Authorized By:
+- Submitted By:
+- Certified By:
+- For Approval:
 
-RETURN ONLY VALID JSON:
-{"found":true,"locations":[{"page_index":0,"description":"Signature area between Regards and printed name","x_percent":0.08,"y_percent":0.66,"width_percent":0.28,"height_percent":0.09}],"reasoning":"Found 1 signature block using label-name pair."}
+STRICT COMPUTATION RULES:
+1. First, treat the FULL PAGE IMAGE as the measurement reference.
+   - Determine the full page width and full page height from the image itself.
+2. Identify the label/closing text and the printed name below it on the same signing block.
+3. Measure the BLANK SIGNING REGION between:
+   - the lower edge of the label/closing text
+   - and the upper region of the printed name
+4. Compute the signature box from that measured region.
+5. The signature box MUST be horizontally centered on the printed name.
+6. The width of the signature box should be based on the name width:
+   - generally close to the name width
+   - may be slightly wider than the name
+   - but the center of the box must align with the center of the printed name
+7. The height of the signature box should come from the measured blank area between label and name.
+8. If the blank area is small, still compute the box from that same region and allow the lower part of the box to slightly overlap the printed name.
+9. Do NOT invent a random page position. Use only the measured label-name block.
+10. If multiple valid signing blocks exist, return all of them.
+
+OUTPUT FORMAT:
+- Return percentages relative to the FULL PAGE IMAGE.
+- x_percent, y_percent, width_percent, height_percent must all be based on the full image width/height.
+- y_percent is TOP-BASED from the top edge of the page image.
+- The returned rectangle must represent the actual signature area computed from the full page measurements.
+
+Return ONLY valid JSON:
+{"found":true,"locations":[{"page_index":0,"description":"Computed signature area between APPROVED BY and printed name","x_percent":0.10,"y_percent":0.18,"width_percent":0.34,"height_percent":0.09}],"reasoning":"Measured full page, identified label-name pair, computed blank signing area, centered box on printed name."}
 
 If nothing is found:
-{"found":false,"locations":[],"reasoning":"No signature label-name pair found."}`;
+{"found":false,"locations":[],"reasoning":"No valid label-name pair found."}`;
 
 function parseAIResponse(raw) {
   if (!raw) {
@@ -147,12 +162,12 @@ function isClosingText(s) {
 function looksLikeNameLine(s) {
   const t = normalizeText(s);
   if (!t) return false;
-  if (t.length < 5 || t.length > 60) return false;
+  if (t.length < 5 || t.length > 70) return false;
   if (/[0-9]/.test(t)) return false;
   if (/[,:;]/.test(t)) return false;
 
   const words = t.split(" ").filter(Boolean);
-  if (words.length < 2 || words.length > 5) return false;
+  if (words.length < 2 || words.length > 6) return false;
 
   const upperish = words.filter(
     (w) => /^[A-Z][A-Za-z.'-]*$/.test(w) || /^[A-Z]+$/.test(w)
@@ -165,7 +180,28 @@ function clamp01(n) {
   return Math.max(0, Math.min(1, n));
 }
 
-function findStrictLabelNamePlacement(doc) {
+function normalizeLocation(loc, pageInfos) {
+  const pi = pageInfos[loc.page_index] || pageInfos[0];
+  if (!pi) return null;
+
+  const x = clamp01(loc.x_percent ?? 0);
+  const y = clamp01(loc.y_percent ?? 0);
+  const w = clamp01(loc.width_percent ?? 0);
+  const h = clamp01(loc.height_percent ?? 0);
+
+  if (w <= 0 || h <= 0) return null;
+
+  return {
+    ...loc,
+    x_percent: x,
+    y_percent: y,
+    width_percent: w,
+    height_percent: h,
+    pageInfo: pi,
+  };
+}
+
+function computeMeasuredFallbackFromText(doc) {
   if (!doc.pageInfos?.length) return null;
 
   const pages = [...doc.pageInfos].sort((a, b) => b.pageNum - a.pageNum);
@@ -182,90 +218,76 @@ function findStrictLabelNamePlacement(doc) {
     if (!items.length) continue;
 
     const labels = items.filter((it) => isClosingText(it.str));
+    if (!labels.length) continue;
 
     for (const label of labels) {
       const lb = label.box;
+      const labelCenterX = lb.x + lb.width / 2;
 
-      const candidates = items
+      const nameCandidates = items
         .filter((it) => {
           if (it === label) return false;
           if (!looksLikeNameLine(it.str)) return false;
 
           const b = it.box;
-          const belowLabel = b.y < lb.y - 6;
-          const withinVerticalRange = b.y > lb.y - 220;
+          const belowLabel = b.y < lb.y - 4;
+          const withinVerticalRange = b.y > lb.y - 230;
 
-          const labelCenterX = lb.x + lb.width / 2;
           const nameCenterX = b.x + b.width / 2;
-          const alignedEnough = Math.abs(nameCenterX - labelCenterX) < 160;
+          const alignedEnough = Math.abs(nameCenterX - labelCenterX) < 180;
 
           return belowLabel && withinVerticalRange && alignedEnough;
         })
-        .sort((a, b) => {
-          const da = Math.abs(lb.y - a.box.y);
-          const db = Math.abs(lb.y - b.box.y);
-          return da - db;
-        });
+        .sort((a, b) => Math.abs(lb.y - a.box.y) - Math.abs(lb.y - b.box.y));
 
-      const name = candidates[0];
+      const name = nameCandidates[0];
       if (!name) continue;
 
       const nb = name.box;
 
-      const left = Math.max(nb.x - 10, 18);
-      const width = Math.max(nb.width + 20, 150);
+      const labelBottomTopBased = pi.height - lb.y;
+      const nameTopTopBased = pi.height - (nb.y + nb.height);
 
-      // pdf.js text coordinates use a bottom-left style origin.
-      // Convert the detected label-name gap into a TOP-BASED box
-      // so preview and final PDF placement use the same meaning.
-      const labelBottom = pi.height - lb.y;
-      const nameTop = pi.height - (nb.y + nb.height);
+      const blankTop = Math.max(labelBottomTopBased + 4, 0);
+      const blankBottom = Math.min(nameTopTopBased + nb.height * 0.45, pi.height);
 
-      const top = Math.max(labelBottom + 6, 0);
-      const bottom = Math.min(nameTop + nb.height * 0.55, pi.height);
+      let boxTop = blankTop;
+      let boxBottom = blankBottom;
 
-      let height = bottom - top;
-
-      // Force a usable signature height while staying anchored to the name block.
-      if (height < 38) {
-        height = 38;
-      }
-      if (height > 82) {
-        height = 82;
+      let boxHeight = boxBottom - boxTop;
+      if (boxHeight < 24) {
+        boxHeight = 38;
+        boxBottom = Math.min(nameTopTopBased + nb.height * 0.55, pi.height);
+        boxTop = Math.max(boxBottom - boxHeight, blankTop);
       }
 
-      let finalTop = top;
+      boxHeight = boxBottom - boxTop;
+      if (boxHeight < 18) continue;
 
-      // Keep lower edge near the printed name when forced height expands the box.
-      if (finalTop + height > bottom) {
-        finalTop = Math.max(bottom - height, 0);
-      }
+      const nameCenterX = nb.x + nb.width / 2;
+      const boxWidth = Math.max(nb.width * 1.08, 130);
+      let boxLeft = nameCenterX - boxWidth / 2;
 
-      // Ensure it doesn't collide too much with the label.
-      if (finalTop < top) {
-        finalTop = top;
-      }
+      if (boxLeft < 0) boxLeft = 0;
+      if (boxLeft + boxWidth > pi.width) boxLeft = Math.max(pi.width - boxWidth, 0);
 
-      const xPercent = clamp01(left / pi.width);
-      const yPercent = clamp01(finalTop / pi.height);
-      const widthPercent = clamp01(width / pi.width);
-      const heightPercent = clamp01(height / pi.height);
-
-      return {
+      const result = {
         found: true,
         locations: [
           {
             page_index: pi.pageNum - 1,
-            description: `Strict placement between "${label.str}" and "${name.str}"`,
-            x_percent: xPercent,
-            y_percent: yPercent,
-            width_percent: widthPercent,
-            height_percent: heightPercent,
+            description: `Computed signature area between "${label.str}" and "${name.str}"`,
+            x_percent: clamp01(boxLeft / pi.width),
+            y_percent: clamp01(boxTop / pi.height),
+            width_percent: clamp01(boxWidth / pi.width),
+            height_percent: clamp01(boxHeight / pi.height),
             pageInfo: pi,
           },
         ],
-        reasoning: `Fallback found label-name pair: "${label.str}" above "${name.str}".`,
+        reasoning: `Measured full page, identified label-name pair, computed blank signing area, centered box on printed name "${name.str}".`,
       };
+
+      return result;
     }
   }
 
@@ -405,13 +427,18 @@ export default function SignDesk() {
           source: {
             type: "base64",
             media_type: "image/jpeg",
-            data: pi.canvas.toDataURL("image/jpeg", 0.9).split(",")[1],
+            data: pi.canvas.toDataURL("image/jpeg", 0.92).split(",")[1],
           },
         }));
 
-        const pageMapNote = pageInfos
-          .map((p, i) => `image index ${i} = page ${p.pageNum}`)
-          .join(", ");
+        const pageMeasurementNote = pageInfos
+          .map(
+            (p, i) =>
+              `image index ${i} = page ${p.pageNum}, image width ${Math.round(
+                p.width
+              )}, image height ${Math.round(p.height)}`
+          )
+          .join("; ");
 
         const res = await fetch("/api/analyze", {
           method: "POST",
@@ -426,7 +453,12 @@ export default function SignDesk() {
                   ...imageContents,
                   {
                     type: "text",
-                    text: `This document has ${pageInfos.length} page(s). Image mapping: ${pageMapNote}.\n\nFind ALL signature locations.\n\n${AI_PROMPT}`,
+                    text:
+                      `This document has ${pageInfos.length} page(s).\n` +
+                      `Use each full page image as the measurement reference.\n` +
+                      `Image-page measurements: ${pageMeasurementNote}.\n\n` +
+                      `Compute the signature area from the full page measurements, blank space between label and name, and horizontal center of the printed name.\n\n` +
+                      `${AI_PROMPT}`,
                   },
                 ],
               },
@@ -455,35 +487,29 @@ export default function SignDesk() {
         let aiResult = parseAIResponse(raw);
 
         if (!aiResult?.found || !aiResult.locations?.length) {
-          const fallbackResult = findStrictLabelNamePlacement({ pageInfos });
-          if (fallbackResult) {
-            aiResult = fallbackResult;
-          }
+          const fallbackResult = computeMeasuredFallbackFromText({ pageInfos });
+          if (fallbackResult) aiResult = fallbackResult;
         }
 
-        if (aiResult.found && aiResult.locations?.length) {
+        if (aiResult?.found && aiResult.locations?.length) {
           aiResult.locations = aiResult.locations
-            .map((loc) => ({
-              ...loc,
-              x_percent: clamp01(loc.x_percent ?? 0),
-              y_percent: clamp01(loc.y_percent ?? 0),
-              width_percent: clamp01(loc.width_percent ?? 0),
-              height_percent: clamp01(loc.height_percent ?? 0),
-              pageInfo: pageInfos[loc.page_index] || pageInfos[0],
-            }))
-            .filter(
-              (loc) =>
-                loc.pageInfo &&
-                loc.width_percent > 0 &&
-                loc.height_percent > 0
-            );
+            .map((loc) => normalizeLocation(loc, pageInfos))
+            .filter(Boolean);
+        }
+
+        if (!aiResult?.locations?.length) {
+          aiResult = {
+            found: false,
+            locations: [],
+            reasoning: aiResult?.reasoning || "No valid signature location found.",
+          };
         }
 
         updateDoc(doc.id, { aiResult });
       } catch (err) {
         console.error("AI/render error:", err);
 
-        const fallbackResult = findStrictLabelNamePlacement({
+        const fallbackResult = computeMeasuredFallbackFromText({
           pageInfos: doc.pageInfos || [],
         });
 
@@ -492,7 +518,7 @@ export default function SignDesk() {
             aiResult: fallbackResult,
             status: "pending",
           });
-          showToast("AI analysis failed, using strict fallback.", "info");
+          showToast("AI analysis failed, using measured fallback.", "info");
           return;
         }
 
@@ -558,10 +584,8 @@ export default function SignDesk() {
         let finalResult = doc.aiResult;
 
         if (!finalResult?.found || !finalResult.locations?.length) {
-          const fallbackResult = findStrictLabelNamePlacement(doc);
-          if (fallbackResult) {
-            finalResult = fallbackResult;
-          }
+          const fallbackResult = computeMeasuredFallbackFromText(doc);
+          if (fallbackResult) finalResult = fallbackResult;
         }
 
         if (finalResult?.found && finalResult.locations?.length) {
@@ -596,7 +620,6 @@ export default function SignDesk() {
 
         for (const pl of placements) {
           const dims = embImg.scaleToFit(pl.w, pl.h);
-
           const drawX = pl.x + (pl.w - dims.width) / 2;
           const drawY = pl.y + (pl.h - dims.height) / 2;
 
@@ -750,7 +773,7 @@ export default function SignDesk() {
                 display: "inline-block",
               }}
             />
-            AI Vision · Auto-Detect
+            AI Measurement · Auto-Compute
           </div>
         </header>
 
@@ -780,7 +803,7 @@ export default function SignDesk() {
                   WebkitTextFillColor: "transparent",
                 }}
               >
-                intelligently.
+                by measured placement.
               </span>
             </h1>
 
@@ -788,13 +811,13 @@ export default function SignDesk() {
               style={{
                 color: G.muted2,
                 fontSize: ".92rem",
-                maxWidth: 540,
+                maxWidth: 560,
                 lineHeight: 1.65,
               }}
             >
-              Upload your signature once. AI scans the PDF and stamps the
-              signature exactly inside the detected box so the actual placement
-              matches the shown location.
+              AI measures the full page, computes the blank signing region between
+              the label and printed name, and centers the signature box on the
+              name width.
             </p>
           </div>
 
@@ -899,7 +922,7 @@ export default function SignDesk() {
                   <>
                     Upload <strong>PDF files</strong> here
                     <br />
-                    AI will locate signature fields automatically
+                    AI will compute the signature region automatically
                   </>
                 }
               >
@@ -1036,7 +1059,7 @@ export default function SignDesk() {
             display: "flex",
             alignItems: "center",
             gap: ".55rem",
-            maxWidth: 300,
+            maxWidth: 340,
           }}
         >
           <span style={{ color: toastColors[toast.type], fontWeight: 700 }}>
@@ -1163,7 +1186,7 @@ function DocCard({ doc, onToggle, onSign, onReject }) {
               background:${G.green};color:#000;padding:1px 5px;border-radius:3px;
               font-weight:700;white-space:nowrap;font-family:'Outfit',sans-serif;`;
 
-            lbl.textContent = "✦ AI: Sign here";
+            lbl.textContent = "✦ AI: Computed sign area";
             ov.appendChild(lbl);
             cont.appendChild(ov);
           });
@@ -1327,7 +1350,7 @@ function DocCard({ doc, onToggle, onSign, onReject }) {
           >
             {!doc.aiResult && doc.status === "analyzing" && (
               <>
-                <strong style={{ color: G.accent2 }}>🤖 AI Analysis</strong> — Scanning pages for signature fields…
+                <strong style={{ color: G.accent2 }}>🤖 AI Analysis</strong> — Measuring full page and computing signature area…
               </>
             )}
 
@@ -1340,7 +1363,7 @@ function DocCard({ doc, onToggle, onSign, onReject }) {
             {doc.aiResult?.found && (
               <>
                 <strong style={{ color: G.accent2 }}>
-                  🤖 AI found {doc.aiResult.locations.length} signature location
+                  🤖 AI found {doc.aiResult.locations.length} computed signature location
                   {doc.aiResult.locations.length > 1 ? "s" : ""}
                 </strong>
 
@@ -1381,11 +1404,7 @@ function DocCard({ doc, onToggle, onSign, onReject }) {
 
             {doc.aiResult && !doc.aiResult.found && (
               <>
-                <strong style={{ color: G.accent2 }}>🤖 AI Analysis</strong> — No explicit field found.
-                <span style={{ color: G.gold }}>
-                  {" "}
-                  Will try strict label-name fallback only.
-                </span>
+                <strong style={{ color: G.accent2 }}>🤖 AI Analysis</strong> — No explicit computed field found.
                 {doc.aiResult.reasoning && (
                   <div
                     style={{
@@ -1438,7 +1457,7 @@ function DocCard({ doc, onToggle, onSign, onReject }) {
                   }}
                 />
                 <br />
-                Rendering &amp; analyzing…
+                Rendering &amp; measuring…
               </div>
             )}
 
