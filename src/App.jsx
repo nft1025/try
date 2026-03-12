@@ -247,7 +247,8 @@ export default function SignDesk() {
           const sigW = loc.width_percent * width;
           const sigH = Math.max(loc.height_percent * height, 36);
           const sigX = loc.x_percent * width;
-          const sigY = height - (loc.y_percent + loc.height_percent) * height+35;
+          const sigY = height - (loc.y_percent + loc.height_percent) * height;
+
           placements.push({ page: targetPage, x: sigX, y: Math.max(sigY, 4), w: sigW, h: sigH });
         }
       }
