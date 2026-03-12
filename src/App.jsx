@@ -45,7 +45,13 @@ const G = {
 const AI_PROMPT = `You are analyzing document page images to find ALL locations where a signature should be placed.
 
 PRIMARY RULE:
-When a signature belongs between a label/closing phrase and a printed name, the bounding box must cover the FULL BLANK GAP between them.
+A signature may be placed:
+
+1. In the blank space between the label and the printed name
+OR
+2. Slightly overlapping the printed name
+
+If there is little or no blank space, place the bounding box centered on the printed name so the signature appears above or overlapping the name.
 
 COMMON PATTERNS:
 1. Business closing:
