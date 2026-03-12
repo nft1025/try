@@ -27,7 +27,7 @@ const AI_PROMPT = `You are analyzing document page images to find ALL locations 
 
 PRIMARY PATTERN — Signature above a name (most important):
 Look for any block that follows this layout top to bottom:
-1. A label like "Regards,", "For Approval:", "Approved By:", "Noted By:", "Certified by:", "Prepared by:", "Authorized by:", "Submitted by:", or any role/title label
+1. A label like "Regards,", "For Approval:", "Approved By:","APPROVED BY", "Noted By:", "Certified by:", "Prepared by:", "Authorized by:", "Submitted by:", or any role/title label
 2. A blank space OR a horizontal line (the actual signature line)
 3. A printed name (e.g. "Neil Francis A. Teresa", "Juan dela Cruz")
 
