@@ -44,40 +44,26 @@ const G = {
 
 const AI_PROMPT = `You are analyzing document page images to find ALL locations where a signature should be placed.
 
-PRIMARY PATTERN — Signature above a name (most important):
-Look for any block that follows this layout top to bottom:
-1. A label like "Regards,", "For Approval:", "Approved By:", "Noted By:", "Certified by:", "Prepared by:", "Authorized by:", "Submitted by:", or any role/title label
-2. A blank space OR a horizontal line (the actual signature line)
-3. A printed name (e.g. "Neil Francis A. Teresa", "Juan dela Cruz")
+PRIMARY PATTERN — Signature above a name:
+Look for:
+1. A label like "Regards,", "Sincerely,", "For Approval:", "Approved By:", "Noted By:", "Certified by:", "Prepared by:", "Authorized by:", "Submitted by:"
+2. A blank space OR a horizontal line
+3. A printed name below it
 
-The signature must go IN THE BLANK SPACE / ON THE LINE that is ABOVE the printed name and BELOW the label.
-The signature box should cover that blank gap from just below the label to just above the printed name.
+The signature belongs in the blank space ABOVE the printed name and BELOW the label.
 
-SECONDARY PATTERNS:
-- Explicit signature lines: horizontal underscores with labels like "Signature:", "Signed by:", "Sign here"
-- Form fields with a blank line and label underneath
-- X marks
-- Signature boxes in formal agreement blocks
+Return ONLY valid JSON:
+{"found":true,"locations":[{"page_index":0,"description":"Signature area above printed name","x_percent":0.05,"y_percent":0.78,"width_percent":0.30,"height_percent":0.05}],"reasoning":"Found N signature locations"}
 
-CRITICAL RULES:
-- Find ALL signature locations on the page, not just one
-- The signature goes ABOVE the name, not on the name itself
-- If there are 3 "Approved By / name" blocks, return 3 locations
-- Make the box tall enough for a signature: at least 0.04 of page height
-
-Return ONLY a valid JSON object. No markdown. No explanation. No text before or after. Double-quoted keys only:
-{"found":true,"locations":[{"page_index":0,"description":"Regards block above Neil Francis","x_percent":0.05,"y_percent":0.78,"width_percent":0.30,"height_percent":0.05}],"reasoning":"Found N signature locations"}
-
-If nothing found: {"found":false,"locations":[],"reasoning":"explanation"}`;
+If nothing found:
+{"found":false,"locations":[],"reasoning":"No signature location found."}`;
 
 function parseAIResponse(raw) {
-  console.log("=== RAW AI RESPONSE ===", raw);
-
   if (!raw) {
     return { found: false, locations: [], reasoning: "Empty response." };
   }
 
-  let cleaned = raw.replace(/```json|```/g, "").trim();
+  const cleaned = raw.replace(/```json|```/g, "").trim();
 
   try {
     return JSON.parse(cleaned);
@@ -85,7 +71,6 @@ function parseAIResponse(raw) {
 
   const start = cleaned.indexOf("{");
   const end = cleaned.lastIndexOf("}");
-
   if (start !== -1 && end !== -1 && end > start) {
     try {
       return JSON.parse(cleaned.slice(start, end + 1));
@@ -97,6 +82,137 @@ function parseAIResponse(raw) {
     locations: [],
     reasoning: "Could not parse AI response.",
   };
+}
+
+function normalizeText(s = "") {
+  return s.replace(/\s+/g, " ").trim();
+}
+
+function getTextItemBox(item) {
+  const tx = item.transform || [];
+  const x = tx[4] || 0;
+  const y = tx[5] || 0;
+  const width = item.width || 0;
+  const height = Math.abs(tx[3] || item.height || 12) || 12;
+  return { x, y, width, height };
+}
+
+function isClosingText(s) {
+  const t = normalizeText(s).toLowerCase();
+  return [
+    "sincerely,",
+    "regards,",
+    "best regards,",
+    "respectfully,",
+    "very truly yours,",
+    "yours truly,",
+    "approved by:",
+    "approved by",
+    "noted by:",
+    "noted by",
+    "prepared by:",
+    "prepared by",
+    "authorized by:",
+    "authorized by",
+    "submitted by:",
+    "submitted by",
+    "certified by:",
+    "certified by",
+    "for approval:",
+    "for approval",
+  ].includes(t);
+}
+
+function looksLikeNameLine(s) {
+  const t = normalizeText(s);
+  if (!t) return false;
+  if (t.length < 5 || t.length > 60) return false;
+  if (/[0-9]/.test(t)) return false;
+  if (/[,:;]/.test(t)) return false;
+
+  const words = t.split(" ").filter(Boolean);
+  if (words.length < 2 || words.length > 5) return false;
+
+  const upperish = words.filter((w) => /^[A-Z][A-Za-z.'-]*$/.test(w) || /^[A-Z]+$/.test(w)).length;
+  return upperish >= Math.max(2, words.length - 1);
+}
+
+function findNameBasedPlacement(doc) {
+  if (!doc.pageInfos?.length) return null;
+
+  // Prefer last page first, then earlier pages
+  const pages = [...doc.pageInfos].sort((a, b) => b.pageNum - a.pageNum);
+
+  for (const pi of pages) {
+    const items = (pi.textItems || [])
+      .map((it) => ({
+        ...it,
+        str: normalizeText(it.str || ""),
+        box: getTextItemBox(it),
+      }))
+      .filter((it) => it.str);
+
+    if (!items.length) continue;
+
+    // Try to find a closing line, then a name below it
+    for (const closing of items) {
+      if (!isClosingText(closing.str)) continue;
+
+      const closingBox = closing.box;
+
+      const belowCandidates = items.filter((it) => {
+        const b = it.box;
+        const verticallyBelow = b.y < closingBox.y - 8;
+        const notTooFar = b.y > closingBox.y - 180;
+        const alignedEnough = Math.abs(b.x - closingBox.x) < 120;
+        return verticallyBelow && notTooFar && alignedEnough;
+      });
+
+      const nameCandidate = belowCandidates.find((it) => looksLikeNameLine(it.str));
+      if (nameCandidate) {
+        const nameBox = nameCandidate.box;
+
+        // Signature area is the blank gap above the name
+        const gapTopY = closingBox.y - closingBox.height - 8;
+        const gapBottomY = nameBox.y + nameBox.height + 4;
+        const gapHeightPdf = Math.max(gapTopY - gapBottomY, 28);
+
+        const x = Math.max(nameBox.x - 6, 18);
+        const w = Math.max(nameBox.width + 12, 140);
+        const y = gapBottomY;
+
+        return {
+          pageNum: pi.pageNum,
+          x,
+          y,
+          w,
+          h: Math.min(Math.max(gapHeightPdf, 32), 72),
+          description: `Name-based placement above "${nameCandidate.str}"`,
+        };
+      }
+    }
+
+    // Fallback: find lowest likely name on page
+    const nameLines = items
+      .filter((it) => looksLikeNameLine(it.str))
+      .sort((a, b) => a.box.y - b.box.y);
+
+    if (nameLines.length) {
+      const name = nameLines[0];
+      const nameBox = name.box;
+
+      return {
+        pageNum: pi.pageNum,
+        x: Math.max(nameBox.x - 6, 18),
+        y: nameBox.y + nameBox.height + 8,
+        w: Math.max(nameBox.width + 12, 150),
+        h: 42,
+        description: `Fallback above printed name "${name.str}"`,
+      };
+    }
+  }
+
+  return null;
 }
 
 export default function SignDesk() {
@@ -173,7 +289,6 @@ export default function SignDesk() {
     setDocs((prev) => prev.map((d) => (d.id === id ? { ...d, ...patch } : d)));
   }, []);
 
-  // IMPORTANT: declare renderAndAnalyze BEFORE toggleCard
   const renderAndAnalyze = useCallback(
     async (doc) => {
       if (doc.previewRendered) return;
@@ -196,6 +311,7 @@ export default function SignDesk() {
         for (let p = 1; p <= Math.min(pdfJs.numPages, 8); p++) {
           const page = await pdfJs.getPage(p);
           const vp = page.getViewport({ scale: 1.5 });
+
           const canvas = document.createElement("canvas");
           canvas.width = vp.width;
           canvas.height = vp.height;
@@ -205,19 +321,29 @@ export default function SignDesk() {
             viewport: vp,
           }).promise;
 
+          let textItems = [];
+          try {
+            const textContent = await page.getTextContent();
+            textItems = (textContent.items || []).map((it) => ({
+              str: it.str,
+              width: it.width,
+              height: it.height,
+              transform: it.transform,
+            }));
+          } catch (_) {}
+
           pageInfos.push({
             pageNum: p,
             canvas,
             width: vp.width,
             height: vp.height,
+            textItems,
           });
         }
 
         updateDoc(doc.id, { pageInfos, status: "pending" });
 
-        const toAnalyze = pageInfos;
-
-        const imageContents = toAnalyze.map((pi) => ({
+        const imageContents = pageInfos.map((pi) => ({
           type: "image",
           source: {
             type: "base64",
@@ -226,7 +352,7 @@ export default function SignDesk() {
           },
         }));
 
-        const pageMapNote = toAnalyze
+        const pageMapNote = pageInfos
           .map((p, i) => `image index ${i} = page ${p.pageNum}`)
           .join(", ");
 
@@ -243,7 +369,7 @@ export default function SignDesk() {
                   ...imageContents,
                   {
                     type: "text",
-                    text: `This document has ${toAnalyze.length} page(s). Image mapping: ${pageMapNote}.\n\nFind ALL signature locations.\n\n${AI_PROMPT}`,
+                    text: `This document has ${pageInfos.length} page(s). Image mapping: ${pageMapNote}.\n\nFind ALL signature locations.\n\n${AI_PROMPT}`,
                   },
                 ],
               },
@@ -274,7 +400,7 @@ export default function SignDesk() {
         if (aiResult.found && aiResult.locations?.length) {
           aiResult.locations = aiResult.locations.map((loc) => ({
             ...loc,
-            pageInfo: toAnalyze[loc.page_index] || toAnalyze[0],
+            pageInfo: pageInfos[loc.page_index] || pageInfos[0],
           }));
         }
 
@@ -338,28 +464,26 @@ export default function SignDesk() {
             : await pdfDoc.embedPng(imgBytes);
 
         const pdfPages = pdfDoc.getPages();
-        const now = new Date().toLocaleString();
         const placements = [];
+        const now = new Date().toLocaleString();
 
+        // 1) Use AI placements if found
         if (doc.aiResult?.found && doc.aiResult.locations?.length) {
           for (const loc of doc.aiResult.locations) {
             const pi = loc.pageInfo;
             if (!pi) continue;
-        
+
             const targetPage = pdfPages[pi.pageNum - 1];
             if (!targetPage) continue;
-        
+
             const { width, height } = targetPage.getSize();
-        
-            // AI box in PDF units
+
             const boxX = loc.x_percent * width;
             const boxYFromTop = loc.y_percent * height;
             const boxW = loc.width_percent * width;
             const boxH = Math.max(loc.height_percent * height, 36);
-        
-            // Convert top-left image coords to PDF bottom-left coords
             const boxY = height - boxYFromTop - boxH;
-        
+
             placements.push({
               page: targetPage,
               x: boxX,
@@ -370,6 +494,25 @@ export default function SignDesk() {
           }
         }
 
+        // 2) If AI fails, use printed-name anchor
+        if (placements.length === 0) {
+          const fallback = findNameBasedPlacement(doc);
+
+          if (fallback) {
+            const targetPage = pdfPages[fallback.pageNum - 1];
+            if (targetPage) {
+              placements.push({
+                page: targetPage,
+                x: fallback.x,
+                y: fallback.y,
+                w: fallback.w,
+                h: fallback.h,
+              });
+            }
+          }
+        }
+
+        // 3) Last-resort fallback
         if (placements.length === 0) {
           const last = pdfPages[pdfPages.length - 1];
           const { width } = last.getSize();
@@ -385,14 +528,12 @@ export default function SignDesk() {
         }
 
         for (const pl of placements) {
-  // leave a little padding so the signature stays inside the box
           const padX = 6;
           const padY = 4;
           const fitW = Math.max(pl.w - padX * 2, 20);
           const fitH = Math.max(pl.h - padY * 2, 20);
-        
           const dims = embImg.scaleToFit(fitW, fitH);
-        
+
           pl.page.drawImage(embImg, {
             x: pl.x + (pl.w - dims.width) / 2,
             y: pl.y + (pl.h - dims.height) / 2,
@@ -410,9 +551,7 @@ export default function SignDesk() {
         });
 
         const signedBytes = await pdfDoc.save();
-        const signedBlob = new Blob([signedBytes], {
-          type: "application/pdf",
-        });
+        const signedBlob = new Blob([signedBytes], { type: "application/pdf" });
 
         updateDoc(doc.id, {
           status: "signed",
@@ -421,12 +560,7 @@ export default function SignDesk() {
           previewRendered: false,
         });
 
-        showToast(
-          `"${doc.name}" signed at ${placements.length} location${
-            placements.length > 1 ? "s" : ""
-          }!`,
-          "success"
-        );
+        showToast(`"${doc.name}" signed successfully!`, "success");
       } catch (err) {
         console.error(err);
         updateDoc(doc.id, { status: "pending" });
@@ -448,8 +582,7 @@ export default function SignDesk() {
     total: docs.length,
     signed: docs.filter((d) => d.status === "signed").length,
     rej: docs.filter((d) => d.status === "rejected").length,
-    pend: docs.filter((d) => ["pending", "analyzing"].includes(d.status))
-      .length,
+    pend: docs.filter((d) => ["pending", "analyzing"].includes(d.status)).length,
   };
 
   const toastColors = {
@@ -593,8 +726,8 @@ export default function SignDesk() {
                 lineHeight: 1.65,
               }}
             >
-              Upload your signature once. AI visually scans each document to
-              pinpoint the exact signature field — no placeholders needed.
+              Upload your signature once. AI scans the PDF and, if needed, falls
+              back to the printed name block to place the signature above it.
             </p>
           </div>
 
@@ -755,13 +888,7 @@ export default function SignDesk() {
                 </span>
               </div>
 
-              <div
-                style={{
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: ".9rem",
-                }}
-              >
+              <div style={{ display: "flex", flexDirection: "column", gap: ".9rem" }}>
                 {docs.map((doc) => (
                   <DocCard
                     key={doc.id}
@@ -937,7 +1064,6 @@ function DocCard({ doc, onToggle, onSign, onReject }) {
     if (renderedRef.current) return;
 
     renderedRef.current = true;
-
     const wrap = canvasRef.current;
     wrap.innerHTML = "";
 
@@ -948,8 +1074,7 @@ function DocCard({ doc, onToggle, onSign, onReject }) {
       const cv2 = document.createElement("canvas");
       cv2.width = pi.width;
       cv2.height = pi.height;
-      cv2.style.cssText =
-        "border-radius:3px;max-width:100%;display:block;";
+      cv2.style.cssText = "border-radius:3px;max-width:100%;display:block;";
       cv2.getContext("2d").drawImage(pi.canvas, 0, 0);
       cont.appendChild(cv2);
 
@@ -1081,9 +1206,7 @@ function DocCard({ doc, onToggle, onSign, onReject }) {
           >
             {doc.name}
           </div>
-          <div style={{ fontSize: ".73rem", color: G.muted }}>
-            {fmt(doc.size)}
-          </div>
+          <div style={{ fontSize: ".73rem", color: G.muted }}>{fmt(doc.size)}</div>
         </div>
 
         <span
@@ -1137,23 +1260,21 @@ function DocCard({ doc, onToggle, onSign, onReject }) {
           >
             {!doc.aiResult && doc.status === "analyzing" && (
               <>
-                <strong style={{ color: G.accent2 }}>🤖 AI Analysis</strong> —
-                Scanning pages for signature fields…
+                <strong style={{ color: G.accent2 }}>🤖 AI Analysis</strong> — Scanning pages for signature fields…
               </>
             )}
 
             {!doc.aiResult && doc.status !== "analyzing" && (
               <>
-                <strong style={{ color: G.accent2 }}>🤖 AI Analysis</strong> —
-                Opening document…
+                <strong style={{ color: G.accent2 }}>🤖 AI Analysis</strong> — Opening document…
               </>
             )}
 
             {doc.aiResult?.found && (
               <>
                 <strong style={{ color: G.accent2 }}>
-                  🤖 AI found {doc.aiResult.locations.length} signature
-                  location{doc.aiResult.locations.length > 1 ? "s" : ""}
+                  🤖 AI found {doc.aiResult.locations.length} signature location
+                  {doc.aiResult.locations.length > 1 ? "s" : ""}
                 </strong>
 
                 {doc.aiResult.locations.map((l, i) => (
@@ -1193,12 +1314,8 @@ function DocCard({ doc, onToggle, onSign, onReject }) {
 
             {doc.aiResult && !doc.aiResult.found && (
               <>
-                <strong style={{ color: G.accent2 }}>🤖 AI Analysis</strong> —
-                No explicit field found.{" "}
-                <span style={{ color: G.gold }}>
-                  Will place at default bottom-right.
-                </span>
-
+                <strong style={{ color: G.accent2 }}>🤖 AI Analysis</strong> — No explicit field found.
+                <span style={{ color: G.gold }}> Will use printed-name fallback.</span>
                 {doc.aiResult.reasoning && (
                   <div
                     style={{
