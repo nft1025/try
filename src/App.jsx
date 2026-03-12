@@ -44,18 +44,43 @@ const G = {
 
 const AI_PROMPT = `You are analyzing document page images to find ALL locations where a signature should be placed.
 
-PRIMARY PATTERN — Signature above a name:
-Look for:
-1. A label like "Regards,", "Sincerely,", "For Approval:", "Approved By:", "Noted By:", "Certified by:", "Prepared by:", "Authorized by:", "Submitted by:"
-2. A blank space OR a horizontal line
-3. A printed name below it
+PRIMARY RULE:
+When a signature belongs between a label/closing phrase and a printed name, the bounding box must cover the FULL BLANK GAP between them.
 
-The signature belongs in the blank space ABOVE the printed name and BELOW the label.
+COMMON PATTERNS:
+1. Business closing:
+   - "Regards,"
+   - "Sincerely,"
+   - "Best regards,"
+   - "Respectfully,"
+   - "Yours truly,"
+
+   If one of these appears, and a printed name appears below it, place the box in the blank area BETWEEN the closing phrase and the printed name.
+
+2. Approval block:
+   - "Approved By:"
+   - "Prepared By:"
+   - "Noted By:"
+   - "Authorized By:"
+   - "Submitted By:"
+   - "Certified By:"
+   - "For Approval:"
+
+   If one of these appears, and a printed name appears below it, place the box in the blank area BETWEEN the label and the printed name.
+
+CRITICAL BOUNDING-BOX RULES:
+- The box must start just BELOW the label/closing phrase
+- The box must end just ABOVE the printed name
+- Do NOT return a tiny box in the middle
+- Do NOT place the box on the printed name
+- Do NOT place the box too close to the label text
+- The height should represent most of the available blank signing area
+- If there are multiple matching blocks, return all of them
 
 Return ONLY valid JSON:
-{"found":true,"locations":[{"page_index":0,"description":"Signature area above printed name","x_percent":0.05,"y_percent":0.78,"width_percent":0.30,"height_percent":0.05}],"reasoning":"Found N signature locations"}
+{"found":true,"locations":[{"page_index":0,"description":"Signature area between Sincerely and printed name","x_percent":0.08,"y_percent":0.66,"width_percent":0.28,"height_percent":0.09}],"reasoning":"Found 1 signature location using full blank gap"}
 
-If nothing found:
+If nothing is found:
 {"found":false,"locations":[],"reasoning":"No signature location found."}`;
 
 function parseAIResponse(raw) {
@@ -398,10 +423,17 @@ export default function SignDesk() {
         const aiResult = parseAIResponse(raw);
 
         if (aiResult.found && aiResult.locations?.length) {
-          aiResult.locations = aiResult.locations.map((loc) => ({
-            ...loc,
-            pageInfo: pageInfos[loc.page_index] || pageInfos[0],
-          }));
+          aiResult.locations = aiResult.locations.map((loc) => {
+            const expanded = {
+              ...loc,
+              x_percent: Math.max(0, loc.x_percent - 0.01),
+              width_percent: Math.min(1, loc.width_percent + 0.02),
+              height_percent: Math.max(loc.height_percent, 0.07),
+              pageInfo: pageInfos[loc.page_index] || pageInfos[0],
+            };
+        
+            return expanded;
+          });
         }
 
         updateDoc(doc.id, { aiResult });
@@ -468,30 +500,27 @@ export default function SignDesk() {
         const now = new Date().toLocaleString();
 
         // 1) Use AI placements if found
-        if (doc.aiResult?.found && doc.aiResult.locations?.length) {
-          for (const loc of doc.aiResult.locations) {
-            const pi = loc.pageInfo;
-            if (!pi) continue;
-
-            const targetPage = pdfPages[pi.pageNum - 1];
-            if (!targetPage) continue;
-
-            const { width, height } = targetPage.getSize();
-
-            const boxX = loc.x_percent * width;
-            const boxYFromTop = loc.y_percent * height;
-            const boxW = loc.width_percent * width;
-            const boxH = Math.max(loc.height_percent * height, 36);
-            const boxY = height - boxYFromTop - boxH;
-
-            placements.push({
-              page: targetPage,
-              x: boxX,
-              y: Math.max(boxY, 4),
-              w: boxW,
-              h: boxH,
-            });
-          }
+      if (doc.aiResult?.found && doc.aiResult.locations?.length) {
+        for (const pl of placements) {
+          const padX = 8;
+          const padTop = 6;
+          const padBottom = 2;
+        
+          const fitW = Math.max(pl.w - padX * 2, 20);
+          const fitH = Math.max(pl.h - padTop - padBottom, 20);
+          const dims = embImg.scaleToFit(fitW, fitH);
+        
+          // Slight downward bias so it visually sits nearer the printed name
+          const drawX = pl.x + (pl.w - dims.width) / 2;
+          const drawY = pl.y + Math.max((pl.h - dims.height) * 0.35, 2);
+        
+          pl.page.drawImage(embImg, {
+            x: drawX,
+            y: drawY,
+            width: dims.width,
+            height: dims.height,
+            opacity: 0.93,
+          });
         }
 
         // 2) If AI fails, use printed-name anchor
