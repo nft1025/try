@@ -345,23 +345,27 @@ export default function SignDesk() {
           for (const loc of doc.aiResult.locations) {
             const pi = loc.pageInfo;
             if (!pi) continue;
-
+        
             const targetPage = pdfPages[pi.pageNum - 1];
             if (!targetPage) continue;
-
+        
             const { width, height } = targetPage.getSize();
-            const sigW = loc.width_percent * width;
-            const sigH = Math.max(loc.height_percent * height, 36);
-            const sigX = loc.x_percent * width;
-            const sigY =
-              height - (loc.y_percent + loc.height_percent) * height;
-
+        
+            // AI box in PDF units
+            const boxX = loc.x_percent * width;
+            const boxYFromTop = loc.y_percent * height;
+            const boxW = loc.width_percent * width;
+            const boxH = Math.max(loc.height_percent * height, 36);
+        
+            // Convert top-left image coords to PDF bottom-left coords
+            const boxY = height - boxYFromTop - boxH;
+        
             placements.push({
               page: targetPage,
-              x: sigX,
-              y: Math.max(sigY, 4),
-              w: sigW,
-              h: sigH,
+              x: boxX,
+              y: Math.max(boxY, 4),
+              w: boxW,
+              h: boxH,
             });
           }
         }
