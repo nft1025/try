@@ -53,6 +53,7 @@ If nothing found: {"found":false,"locations":[],"reasoning":"explanation"}`;
 
 // ── Robust JSON parser ─────────────────────────────────────────────────────
 function parseAIResponse(raw) {
+  console.log("=== RAW AI RESPONSE ===", raw);
   if (!raw) return { found: false, locations: [], reasoning: "Empty response." };
 
   // 1. Strip markdown fences
