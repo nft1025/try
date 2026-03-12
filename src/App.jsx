@@ -161,6 +161,10 @@ function looksLikeNameLine(s) {
   return upperish >= Math.max(2, words.length - 1);
 }
 
+function clamp01(n) {
+  return Math.max(0, Math.min(1, n));
+}
+
 function findStrictLabelNamePlacement(doc) {
   if (!doc.pageInfos?.length) return null;
 
@@ -208,27 +212,34 @@ function findStrictLabelNamePlacement(doc) {
 
       const nb = name.box;
 
+      const x = Math.max(nb.x - 10, 18);
+      const w = Math.max(nb.width + 20, 150);
+
       const topY = lb.y - lb.height - 6;
       const bottomY = nb.y + nb.height * 0.45;
       const rawHeight = topY - bottomY;
+      const h = Math.min(Math.max(rawHeight, 38), 82);
+      const y = bottomY;
 
-      const x = Math.max(nb.x - 10, 18);
-      const w = Math.max(nb.width + 20, 150);
-      let h = Math.max(rawHeight, 38);
-      h = Math.min(h, 82);
-
-      let y = bottomY;
-      if (rawHeight < h) {
-        y = bottomY;
-      }
+      const xPercent = clamp01(x / pi.width);
+      const yPercent = clamp01((pi.height - (y + h)) / pi.height);
+      const widthPercent = clamp01(w / pi.width);
+      const heightPercent = clamp01(h / pi.height);
 
       return {
-        pageNum: pi.pageNum,
-        x,
-        y,
-        w,
-        h,
-        description: `Strict placement between "${label.str}" and "${name.str}"`,
+        found: true,
+        locations: [
+          {
+            page_index: pi.pageNum - 1,
+            description: `Strict placement between "${label.str}" and "${name.str}"`,
+            x_percent: xPercent,
+            y_percent: yPercent,
+            width_percent: widthPercent,
+            height_percent: heightPercent,
+            pageInfo: pi,
+          },
+        ],
+        reasoning: `Fallback found label-name pair: "${label.str}" above "${name.str}".`,
       };
     }
   }
@@ -416,25 +427,46 @@ export default function SignDesk() {
         }
 
         const raw = data.content?.find((c) => c.type === "text")?.text || "{}";
-        const aiResult = parseAIResponse(raw);
+        let aiResult = parseAIResponse(raw);
+
+        if (!aiResult?.found || !aiResult.locations?.length) {
+          const fallbackResult = findStrictLabelNamePlacement({ pageInfos });
+          if (fallbackResult) {
+            aiResult = fallbackResult;
+          }
+        }
 
         if (aiResult.found && aiResult.locations?.length) {
-          aiResult.locations = aiResult.locations.map((loc) => ({
-            ...loc,
-            x_percent: Math.max(0, loc.x_percent ?? 0),
-            y_percent: Math.max(0, loc.y_percent ?? 0),
-            width_percent: Math.min(1, Math.max(loc.width_percent ?? 0.22, 0.16)),
-            height_percent: Math.min(
-              0.16,
-              Math.max(loc.height_percent ?? 0.08, 0.06)
-            ),
-            pageInfo: pageInfos[loc.page_index] || pageInfos[0],
-          }));
+          aiResult.locations = aiResult.locations
+            .map((loc) => ({
+              ...loc,
+              x_percent: clamp01(loc.x_percent ?? 0),
+              y_percent: clamp01(loc.y_percent ?? 0),
+              width_percent: clamp01(loc.width_percent ?? 0),
+              height_percent: clamp01(loc.height_percent ?? 0),
+              pageInfo: pageInfos[loc.page_index] || pageInfos[0],
+            }))
+            .filter(
+              (loc) =>
+                loc.pageInfo &&
+                loc.width_percent > 0 &&
+                loc.height_percent > 0
+            );
         }
 
         updateDoc(doc.id, { aiResult });
       } catch (err) {
         console.error("AI/render error:", err);
+
+        const fallbackResult = findStrictLabelNamePlacement(doc);
+        if (fallbackResult) {
+          updateDoc(doc.id, {
+            aiResult: fallbackResult,
+            status: "pending",
+          });
+          showToast("AI analysis failed, using strict fallback.", "info");
+          return;
+        }
 
         updateDoc(doc.id, {
           aiResult: {
@@ -495,9 +527,18 @@ export default function SignDesk() {
         const placements = [];
         const now = new Date().toLocaleString();
 
-        if (doc.aiResult?.found && doc.aiResult.locations?.length) {
-          for (const loc of doc.aiResult.locations) {
-            const pi = loc.pageInfo;
+        let finalResult = doc.aiResult;
+
+        if (!finalResult?.found || !finalResult.locations?.length) {
+          const fallbackResult = findStrictLabelNamePlacement(doc);
+          if (fallbackResult) {
+            finalResult = fallbackResult;
+          }
+        }
+
+        if (finalResult?.found && finalResult.locations?.length) {
+          for (const loc of finalResult.locations) {
+            const pi = loc.pageInfo || doc.pageInfos?.[loc.page_index];
             if (!pi) continue;
 
             const targetPage = pdfPages[pi.pageNum - 1];
@@ -507,14 +548,14 @@ export default function SignDesk() {
 
             const boxX = loc.x_percent * width;
             const boxYTop = loc.y_percent * height;
-            const boxW = Math.max(loc.width_percent * width, 140);
-            const boxH = Math.max(loc.height_percent * height, 42);
+            const boxW = loc.width_percent * width;
+            const boxH = loc.height_percent * height;
             const boxY = height - boxYTop - boxH;
 
             placements.push({
               page: targetPage,
               x: boxX,
-              y: Math.max(boxY, 4),
+              y: Math.max(boxY, 0),
               w: boxW,
               h: boxH,
             });
@@ -522,37 +563,14 @@ export default function SignDesk() {
         }
 
         if (placements.length === 0) {
-          const fallback = findStrictLabelNamePlacement(doc);
-
-          if (fallback) {
-            const targetPage = pdfPages[fallback.pageNum - 1];
-            if (targetPage) {
-              placements.push({
-                page: targetPage,
-                x: fallback.x,
-                y: fallback.y,
-                w: fallback.w,
-                h: fallback.h,
-              });
-            }
-          }
-        }
-
-        if (placements.length === 0) {
-          throw new Error("No valid label-name signature block found.");
+          throw new Error("No valid detected signature box found.");
         }
 
         for (const pl of placements) {
-          const padX = 8;
-          const padTop = 6;
-          const padBottom = 2;
-
-          const fitW = Math.max(pl.w - padX * 2, 20);
-          const fitH = Math.max(pl.h - padTop - padBottom, 20);
-          const dims = embImg.scaleToFit(fitW, fitH);
+          const dims = embImg.scaleToFit(pl.w, pl.h);
 
           const drawX = pl.x + (pl.w - dims.width) / 2;
-          const drawY = pl.y + Math.max((pl.h - dims.height) * 0.12, 1);
+          const drawY = pl.y + (pl.h - dims.height) / 2;
 
           pl.page.drawImage(embImg, {
             x: drawX,
@@ -746,9 +764,9 @@ export default function SignDesk() {
                 lineHeight: 1.65,
               }}
             >
-              Upload your signature once. AI scans the PDF and places the signature
-              strictly between the closing or approval label and the printed name,
-              even when the gap is small.
+              Upload your signature once. AI scans the PDF and stamps the
+              signature exactly inside the detected box so the actual placement
+              matches the shown location.
             </p>
           </div>
 
