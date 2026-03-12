@@ -256,7 +256,7 @@ function computeMeasuredFallbackFromText(doc) {
 
       let boxHeight = boxBottom - boxTop;
       if (boxHeight < 24) {
-        boxHeight = 38;
+        boxHeight = 50;
         boxBottom = Math.min(nameTopTopBased + nb.height * 0.55, pi.height);
         boxTop = Math.max(boxBottom - boxHeight, blankTop);
       }
@@ -265,18 +265,20 @@ function computeMeasuredFallbackFromText(doc) {
       if (boxHeight < 18) continue;
 
       const nameCenterX = nb.x + nb.width / 2;
-      const boxWidth = Math.max(nb.width * 1.08, 130);
+      const boxWidth = Math.max(nb.width * 1.1, 130);
       let boxLeft = nameCenterX - boxWidth / 2;
 
       if (boxLeft < 0) boxLeft = 0;
-      if (boxLeft + boxWidth > pi.width) boxLeft = Math.max(pi.width - boxWidth, 0);
+      if (boxLeft + boxWidth > pi.width) {
+        boxLeft = Math.max(pi.width - boxWidth, 0);
+      }
 
       const result = {
         found: true,
         locations: [
           {
             page_index: pi.pageNum - 1,
-            description: `Computed signature area between "${label.str}" and "${name.str}"`,
+            description: `Computed signature area between ${label.str} and printed name`,
             x_percent: clamp01(boxLeft / pi.width),
             y_percent: clamp01(boxTop / pi.height),
             width_percent: clamp01(boxWidth / pi.width),
@@ -284,7 +286,21 @@ function computeMeasuredFallbackFromText(doc) {
             pageInfo: pi,
           },
         ],
-        reasoning: `Measured full page, identified label-name pair, computed blank signing area, centered box on printed name "${name.str}".`,
+        reasoning: `Measured full page (width ${Math.round(
+          pi.width
+        )}, height ${Math.round(
+          pi.height
+        )}), identified the label '${label.str}' at (${Math.round(
+          lb.x
+        )}, ${Math.round(pi.height - (lb.y + lb.height))}, ${Math.round(
+          lb.width
+        )}, ${Math.round(lb.height)}) and the printed name '${
+          name.str
+        }' at (${Math.round(nb.x)}, ${Math.round(
+          pi.height - (nb.y + nb.height)
+        )}, ${Math.round(nb.width)}, ${Math.round(
+          nb.height
+        )}). The blank signing area was measured from the full page and the box was horizontally centered on the printed name.`,
       };
 
       return result;
@@ -619,15 +635,11 @@ export default function SignDesk() {
         }
 
         for (const pl of placements) {
-          const dims = embImg.scaleToFit(pl.w, pl.h);
-          const drawX = pl.x + (pl.w - dims.width) / 2;
-          const drawY = pl.y + (pl.h - dims.height) / 2;
-
           pl.page.drawImage(embImg, {
-            x: drawX,
-            y: drawY,
-            width: dims.width,
-            height: dims.height,
+            x: pl.x,
+            y: pl.y,
+            width: pl.w,
+            height: pl.h,
             opacity: 0.93,
           });
         }
@@ -816,8 +828,8 @@ export default function SignDesk() {
               }}
             >
               AI measures the full page, computes the blank signing region between
-              the label and printed name, and centers the signature box on the
-              name width.
+              the label and printed name, and the final stamp uses that exact
+              measured rectangle.
             </p>
           </div>
 
@@ -1395,6 +1407,7 @@ function DocCard({ doc, onToggle, onSign, onReject }) {
                     fontSize: ".76rem",
                     color: G.muted,
                     marginTop: ".35rem",
+                    whiteSpace: "pre-wrap",
                   }}
                 >
                   {doc.aiResult.reasoning}
