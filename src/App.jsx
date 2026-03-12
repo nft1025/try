@@ -56,47 +56,19 @@ function parseAIResponse(raw) {
   console.log("=== RAW AI RESPONSE ===", raw);
   if (!raw) return { found: false, locations: [], reasoning: "Empty response." };
 
-  // 1. Strip markdown fences
   let cleaned = raw.replace(/```json|```/g, "").trim();
 
-  // 2. Direct parse
+  // Try direct parse
   try { return JSON.parse(cleaned); } catch (_) {}
 
-  // 3. Extract JSON block
-  const startIdx = cleaned.indexOf('{');
-  if (startIdx !== -1) {
-    let jsonStr = cleaned.slice(startIdx);
-
-    // Try direct parse of extracted block
-    try { return JSON.parse(jsonStr); } catch (_) {}
-
-    // Auto-close truncated JSON
-    try {
-      let fixed = jsonStr;
-      // Remove trailing comma
-      fixed = fixed.replace(/,\s*$/, '');
-      // Close open string if reasoning was cut off
-      const quoteCount = (fixed.match(/"/g) || []).length;
-      if (quoteCount % 2 !== 0) fixed += '"';
-      // Close open arrays and objects
-      const openBrackets = (fixed.match(/\[/g) || []).length - (fixed.match(/\]/g) || []).length;
-      const openBraces = (fixed.match(/\{/g) || []).length - (fixed.match(/\}/g) || []).length;
-      for (let i = 0; i < openBrackets; i++) fixed += ']';
-      for (let i = 0; i < openBraces; i++) fixed += '}';
-      return JSON.parse(fixed);
-    } catch (_) {}
+  // Extract from first { to last }
+  const start = cleaned.indexOf("{");
+  const end = cleaned.lastIndexOf("}");
+  if (start !== -1 && end !== -1 && end > start) {
+    try { return JSON.parse(cleaned.slice(start, end + 1)); } catch (_) {}
   }
 
-  // 4. Fix common AI mistakes
-  try {
-    const fixed = cleaned
-      .replace(/'/g, '"')
-      .replace(/,\s*}/g, "}")
-      .replace(/,\s*]/g, "]");
-    return JSON.parse(fixed);
-  } catch (_) {}
-
-  // 5. Total fallback
+  // Fallback
   return { found: false, locations: [], reasoning: "Could not parse AI response." };
 }
 
