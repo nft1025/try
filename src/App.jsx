@@ -354,7 +354,7 @@ export default function SignDesk() {
             const sigH = Math.max(loc.height_percent * height, 36);
             const sigX = loc.x_percent * width;
             const sigY =
-              height - (loc.y_percent + loc.height_percent) * height + 40;
+              height - (loc.y_percent + loc.height_percent) * height;
 
             placements.push({
               page: targetPage,
