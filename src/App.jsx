@@ -158,14 +158,16 @@ function looksLikeNameLine(s) {
   const words = t.split(" ").filter(Boolean);
   if (words.length < 2 || words.length > 5) return false;
 
-  const upperish = words.filter((w) => /^[A-Z][A-Za-z.'-]*$/.test(w) || /^[A-Z]+$/.test(w)).length;
+  const upperish = words.filter(
+    (w) => /^[A-Z][A-Za-z.'-]*$/.test(w) || /^[A-Z]+$/.test(w)
+  ).length;
+
   return upperish >= Math.max(2, words.length - 1);
 }
 
 function findNameBasedPlacement(doc) {
   if (!doc.pageInfos?.length) return null;
 
-  // Prefer last page first, then earlier pages
   const pages = [...doc.pageInfos].sort((a, b) => b.pageNum - a.pageNum);
 
   for (const pi of pages) {
@@ -179,7 +181,6 @@ function findNameBasedPlacement(doc) {
 
     if (!items.length) continue;
 
-    // Try to find a closing line, then a name below it
     for (const closing of items) {
       if (!isClosingText(closing.str)) continue;
 
@@ -196,28 +197,21 @@ function findNameBasedPlacement(doc) {
       const nameCandidate = belowCandidates.find((it) => looksLikeNameLine(it.str));
       if (nameCandidate) {
         const nameBox = nameCandidate.box;
-
-        // Signature area is the blank gap above the name
         const gapTopY = closingBox.y - closingBox.height - 8;
         const gapBottomY = nameBox.y + nameBox.height + 4;
         const gapHeightPdf = Math.max(gapTopY - gapBottomY, 28);
 
-        const x = Math.max(nameBox.x - 6, 18);
-        const w = Math.max(nameBox.width + 12, 140);
-        const y = gapBottomY;
-
         return {
           pageNum: pi.pageNum,
-          x,
-          y,
-          w,
+          x: Math.max(nameBox.x - 6, 18),
+          y: gapBottomY,
+          w: Math.max(nameBox.width + 12, 140),
           h: Math.min(Math.max(gapHeightPdf, 32), 72),
           description: `Name-based placement above "${nameCandidate.str}"`,
         };
       }
     }
 
-    // Fallback: find lowest likely name on page
     const nameLines = items
       .filter((it) => looksLikeNameLine(it.str))
       .sort((a, b) => a.box.y - b.box.y);
@@ -423,17 +417,13 @@ export default function SignDesk() {
         const aiResult = parseAIResponse(raw);
 
         if (aiResult.found && aiResult.locations?.length) {
-          aiResult.locations = aiResult.locations.map((loc) => {
-            const expanded = {
-              ...loc,
-              x_percent: Math.max(0, loc.x_percent - 0.01),
-              width_percent: Math.min(1, loc.width_percent + 0.02),
-              height_percent: Math.max(loc.height_percent, 0.07),
-              pageInfo: pageInfos[loc.page_index] || pageInfos[0],
-            };
-        
-            return expanded;
-          });
+          aiResult.locations = aiResult.locations.map((loc) => ({
+            ...loc,
+            x_percent: Math.max(0, (loc.x_percent ?? 0) - 0.01),
+            width_percent: Math.min(1, (loc.width_percent ?? 0.2) + 0.02),
+            height_percent: Math.max(loc.height_percent ?? 0, 0.07),
+            pageInfo: pageInfos[loc.page_index] || pageInfos[0],
+          }));
         }
 
         updateDoc(doc.id, { aiResult });
@@ -499,31 +489,32 @@ export default function SignDesk() {
         const placements = [];
         const now = new Date().toLocaleString();
 
-        // 1) Use AI placements if found
-      if (doc.aiResult?.found && doc.aiResult.locations?.length) {
-        for (const pl of placements) {
-          const padX = 8;
-          const padTop = 6;
-          const padBottom = 2;
-        
-          const fitW = Math.max(pl.w - padX * 2, 20);
-          const fitH = Math.max(pl.h - padTop - padBottom, 20);
-          const dims = embImg.scaleToFit(fitW, fitH);
-        
-          // Slight downward bias so it visually sits nearer the printed name
-          const drawX = pl.x + (pl.w - dims.width) / 2;
-          const drawY = pl.y + Math.max((pl.h - dims.height) * 0.35, 2);
-        
-          pl.page.drawImage(embImg, {
-            x: drawX,
-            y: drawY,
-            width: dims.width,
-            height: dims.height,
-            opacity: 0.93,
-          });
+        if (doc.aiResult?.found && doc.aiResult.locations?.length) {
+          for (const loc of doc.aiResult.locations) {
+            const pi = loc.pageInfo;
+            if (!pi) continue;
+
+            const targetPage = pdfPages[pi.pageNum - 1];
+            if (!targetPage) continue;
+
+            const { width, height } = targetPage.getSize();
+
+            const boxX = loc.x_percent * width;
+            const boxYTop = loc.y_percent * height;
+            const boxW = Math.max(loc.width_percent * width, 140);
+            const boxH = Math.max(loc.height_percent * height, 42);
+            const boxY = height - boxYTop - boxH;
+
+            placements.push({
+              page: targetPage,
+              x: boxX,
+              y: Math.max(boxY, 4),
+              w: boxW,
+              h: boxH,
+            });
+          }
         }
 
-        // 2) If AI fails, use printed-name anchor
         if (placements.length === 0) {
           const fallback = findNameBasedPlacement(doc);
 
@@ -541,7 +532,6 @@ export default function SignDesk() {
           }
         }
 
-        // 3) Last-resort fallback
         if (placements.length === 0) {
           const last = pdfPages[pdfPages.length - 1];
           const { width } = last.getSize();
@@ -557,15 +547,20 @@ export default function SignDesk() {
         }
 
         for (const pl of placements) {
-          const padX = 6;
-          const padY = 4;
+          const padX = 8;
+          const padTop = 6;
+          const padBottom = 2;
+
           const fitW = Math.max(pl.w - padX * 2, 20);
-          const fitH = Math.max(pl.h - padY * 2, 20);
+          const fitH = Math.max(pl.h - padTop - padBottom, 20);
           const dims = embImg.scaleToFit(fitW, fitH);
 
+          const drawX = pl.x + (pl.w - dims.width) / 2;
+          const drawY = pl.y + Math.max((pl.h - dims.height) * 0.35, 2);
+
           pl.page.drawImage(embImg, {
-            x: pl.x + (pl.w - dims.width) / 2,
-            y: pl.y + (pl.h - dims.height) / 2,
+            x: drawX,
+            y: drawY,
             width: dims.width,
             height: dims.height,
             opacity: 0.93,
@@ -755,8 +750,9 @@ export default function SignDesk() {
                 lineHeight: 1.65,
               }}
             >
-              Upload your signature once. AI scans the PDF and, if needed, falls
-              back to the printed name block to place the signature above it.
+              Upload your signature once. AI scans the PDF and expands the
+              detected signing gap so the signature sits properly between the
+              closing text and the printed name.
             </p>
           </div>
 
@@ -1116,9 +1112,9 @@ function DocCard({ doc, onToggle, onSign, onReject }) {
               pointer-events:none;box-shadow:0 0 14px rgba(52,211,153,.45);
               left:${loc.x_percent * pi.width}px;top:${loc.y_percent * pi.height}px;
               width:${loc.width_percent * pi.width}px;height:${Math.max(
-              loc.height_percent * pi.height,
-              18
-            )}px;`;
+                loc.height_percent * pi.height,
+                18
+              )}px;`;
 
             const lbl = document.createElement("div");
             lbl.style.cssText = `position:absolute;top:-19px;left:0;font-size:9px;
