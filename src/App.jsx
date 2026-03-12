@@ -44,50 +44,40 @@ const G = {
 
 const AI_PROMPT = `You are analyzing document page images to find ALL locations where a signature should be placed.
 
-PRIMARY RULE:
-A signature may be placed:
+STRICT RULE:
+A valid signature location exists whenever BOTH of these are present in the same block:
+1. A closing/label text such as:
+   - Regards,
+   - Sincerely,
+   - Best regards,
+   - Respectfully,
+   - Very truly yours,
+   - Yours truly,
+   - Approved By:
+   - Prepared By:
+   - Noted By:
+   - Authorized By:
+   - Submitted By:
+   - Certified By:
+   - For Approval:
+2. A printed person name below that text
 
-1. In the blank space between the label and the printed name
-OR
-2. Slightly overlapping the printed name
+PLACEMENT RULE:
+- The signature must be placed STRICTLY between the closing/label text and the printed name.
+- If the gap is large, fill most of the area between them.
+- If the gap is small, still place the box between them and allow the lower part of the box to overlap the printed name slightly.
+- NEVER reject a valid signing block just because the gap is small.
+- The printed name is the anchor for signature placement.
+- The box should be horizontally aligned to the printed name.
+- The top of the box should start below the closing/label text.
+- The bottom of the box may touch or slightly overlap the printed name.
+- If multiple signing blocks exist, return all of them.
 
-If there is little or no blank space, place the bounding box centered on the printed name so the signature appears above or overlapping the name.
-
-COMMON PATTERNS:
-1. Business closing:
-   - "Regards,"
-   - "Sincerely,"
-   - "Best regards,"
-   - "Respectfully,"
-   - "Yours truly,"
-
-   If one of these appears, and a printed name appears below it, place the box in the blank area BETWEEN the closing phrase and the printed name.
-
-2. Approval block:
-   - "Approved By:"
-   - "Prepared By:"
-   - "Noted By:"
-   - "Authorized By:"
-   - "Submitted By:"
-   - "Certified By:"
-   - "For Approval:"
-
-   If one of these appears, and a printed name appears below it, place the box in the blank area BETWEEN the label and the printed name.
-
-CRITICAL BOUNDING-BOX RULES:
-- The box must start just BELOW the label/closing phrase
-- The box must end just ABOVE the printed name
-- Do NOT return a tiny box in the middle
-- Do NOT place the box on the printed name
-- Do NOT place the box too close to the label text
-- The height should represent most of the available blank signing area
-- If there are multiple matching blocks, return all of them
-
-Return ONLY valid JSON:
-{"found":true,"locations":[{"page_index":0,"description":"Signature area between Sincerely and printed name","x_percent":0.08,"y_percent":0.66,"width_percent":0.28,"height_percent":0.09}],"reasoning":"Found 1 signature location using full blank gap"}
+RETURN ONLY VALID JSON:
+{"found":true,"locations":[{"page_index":0,"description":"Signature area between Regards and printed name","x_percent":0.08,"y_percent":0.66,"width_percent":0.28,"height_percent":0.09}],"reasoning":"Found 1 signature block using label-name pair."}
 
 If nothing is found:
-{"found":false,"locations":[],"reasoning":"No signature location found."}`;
+{"found":false,"locations":[],"reasoning":"No signature label-name pair found."}`;
 
 function parseAIResponse(raw) {
   if (!raw) {
@@ -171,7 +161,7 @@ function looksLikeNameLine(s) {
   return upperish >= Math.max(2, words.length - 1);
 }
 
-function findNameBasedPlacement(doc) {
+function findStrictLabelNamePlacement(doc) {
   if (!doc.pageInfos?.length) return null;
 
   const pages = [...doc.pageInfos].sort((a, b) => b.pageNum - a.pageNum);
@@ -187,52 +177,58 @@ function findNameBasedPlacement(doc) {
 
     if (!items.length) continue;
 
-    for (const closing of items) {
-      if (!isClosingText(closing.str)) continue;
+    const labels = items.filter((it) => isClosingText(it.str));
 
-      const closingBox = closing.box;
+    for (const label of labels) {
+      const lb = label.box;
 
-      const belowCandidates = items.filter((it) => {
-        const b = it.box;
-        const verticallyBelow = b.y < closingBox.y - 8;
-        const notTooFar = b.y > closingBox.y - 180;
-        const alignedEnough = Math.abs(b.x - closingBox.x) < 120;
-        return verticallyBelow && notTooFar && alignedEnough;
-      });
+      const candidates = items
+        .filter((it) => {
+          if (it === label) return false;
+          if (!looksLikeNameLine(it.str)) return false;
 
-      const nameCandidate = belowCandidates.find((it) => looksLikeNameLine(it.str));
-      if (nameCandidate) {
-        const nameBox = nameCandidate.box;
-        const gapTopY = closingBox.y - closingBox.height - 8;
-        const gapBottomY = nameBox.y + nameBox.height + 4;
-        const gapHeightPdf = Math.max(gapTopY - gapBottomY, 28);
+          const b = it.box;
+          const belowLabel = b.y < lb.y - 6;
+          const withinVerticalRange = b.y > lb.y - 220;
 
-        return {
-          pageNum: pi.pageNum,
-          x: Math.max(nameBox.x - 6, 18),
-          y: gapBottomY,
-          w: Math.max(nameBox.width + 12, 140),
-          h: Math.min(Math.max(gapHeightPdf, 32), 72),
-          description: `Name-based placement above "${nameCandidate.str}"`,
-        };
+          const labelCenterX = lb.x + lb.width / 2;
+          const nameCenterX = b.x + b.width / 2;
+          const alignedEnough = Math.abs(nameCenterX - labelCenterX) < 160;
+
+          return belowLabel && withinVerticalRange && alignedEnough;
+        })
+        .sort((a, b) => {
+          const da = Math.abs(lb.y - a.box.y);
+          const db = Math.abs(lb.y - b.box.y);
+          return da - db;
+        });
+
+      const name = candidates[0];
+      if (!name) continue;
+
+      const nb = name.box;
+
+      const topY = lb.y - lb.height - 6;
+      const bottomY = nb.y + nb.height * 0.45;
+      const rawHeight = topY - bottomY;
+
+      const x = Math.max(nb.x - 10, 18);
+      const w = Math.max(nb.width + 20, 150);
+      let h = Math.max(rawHeight, 38);
+      h = Math.min(h, 82);
+
+      let y = bottomY;
+      if (rawHeight < h) {
+        y = bottomY;
       }
-    }
-
-    const nameLines = items
-      .filter((it) => looksLikeNameLine(it.str))
-      .sort((a, b) => a.box.y - b.box.y);
-
-    if (nameLines.length) {
-      const name = nameLines[0];
-      const nameBox = name.box;
 
       return {
         pageNum: pi.pageNum,
-        x: Math.max(nameBox.x - 6, 18),
-        y: nameBox.y + nameBox.height + 8,
-        w: Math.max(nameBox.width + 12, 150),
-        h: 42,
-        description: `Fallback above printed name "${name.str}"`,
+        x,
+        y,
+        w,
+        h,
+        description: `Strict placement between "${label.str}" and "${name.str}"`,
       };
     }
   }
@@ -425,9 +421,13 @@ export default function SignDesk() {
         if (aiResult.found && aiResult.locations?.length) {
           aiResult.locations = aiResult.locations.map((loc) => ({
             ...loc,
-            x_percent: Math.max(0, (loc.x_percent ?? 0) - 0.01),
-            width_percent: Math.min(1, (loc.width_percent ?? 0.2) + 0.02),
-            height_percent: Math.max(loc.height_percent ?? 0, 0.07),
+            x_percent: Math.max(0, loc.x_percent ?? 0),
+            y_percent: Math.max(0, loc.y_percent ?? 0),
+            width_percent: Math.min(1, Math.max(loc.width_percent ?? 0.22, 0.16)),
+            height_percent: Math.min(
+              0.16,
+              Math.max(loc.height_percent ?? 0.08, 0.06)
+            ),
             pageInfo: pageInfos[loc.page_index] || pageInfos[0],
           }));
         }
@@ -522,7 +522,7 @@ export default function SignDesk() {
         }
 
         if (placements.length === 0) {
-          const fallback = findNameBasedPlacement(doc);
+          const fallback = findStrictLabelNamePlacement(doc);
 
           if (fallback) {
             const targetPage = pdfPages[fallback.pageNum - 1];
@@ -539,17 +539,7 @@ export default function SignDesk() {
         }
 
         if (placements.length === 0) {
-          const last = pdfPages[pdfPages.length - 1];
-          const { width } = last.getSize();
-          const dims = embImg.scaleToFit(180, 55);
-
-          placements.push({
-            page: last,
-            x: width - dims.width - 44,
-            y: 32,
-            w: dims.width,
-            h: dims.height,
-          });
+          throw new Error("No valid label-name signature block found.");
         }
 
         for (const pl of placements) {
@@ -562,7 +552,7 @@ export default function SignDesk() {
           const dims = embImg.scaleToFit(fitW, fitH);
 
           const drawX = pl.x + (pl.w - dims.width) / 2;
-          const drawY = pl.y + Math.max((pl.h - dims.height) * 0.35, 2);
+          const drawY = pl.y + Math.max((pl.h - dims.height) * 0.12, 1);
 
           pl.page.drawImage(embImg, {
             x: drawX,
@@ -756,9 +746,9 @@ export default function SignDesk() {
                 lineHeight: 1.65,
               }}
             >
-              Upload your signature once. AI scans the PDF and expands the
-              detected signing gap so the signature sits properly between the
-              closing text and the printed name.
+              Upload your signature once. AI scans the PDF and places the signature
+              strictly between the closing or approval label and the printed name,
+              even when the gap is small.
             </p>
           </div>
 
@@ -1346,7 +1336,10 @@ function DocCard({ doc, onToggle, onSign, onReject }) {
             {doc.aiResult && !doc.aiResult.found && (
               <>
                 <strong style={{ color: G.accent2 }}>🤖 AI Analysis</strong> — No explicit field found.
-                <span style={{ color: G.gold }}> Will use printed-name fallback.</span>
+                <span style={{ color: G.gold }}>
+                  {" "}
+                  Will try strict label-name fallback only.
+                </span>
                 {doc.aiResult.reasoning && (
                   <div
                     style={{
