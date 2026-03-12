@@ -4,7 +4,7 @@ function useScript(src) {
   const [loaded, setLoaded] = useState(false);
   useEffect(() => {
     if (document.querySelector(`script[src="${src}"]`)) { setLoaded(true); return; }
-    const s = document.createElement("script");c
+    const s = document.createElement("script");
     s.src = src; s.async = true;
     s.onload = () => setLoaded(true);
     document.head.appendChild(s);
@@ -247,7 +247,7 @@ export default function SignDesk() {
           const sigW = loc.width_percent * width;
           const sigH = Math.max(loc.height_percent * height, 36);
           const sigX = loc.x_percent * width;
-          const sigY = height - (loc.y_percent + loc.height_percent) * height;
+          const sigY = height - (loc.y_percent + loc.height_percent) * height+35;
           placements.push({ page: targetPage, x: sigX, y: Math.max(sigY, 4), w: sigW, h: sigH });
         }
       }
