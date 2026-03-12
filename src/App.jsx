@@ -212,19 +212,44 @@ function findStrictLabelNamePlacement(doc) {
 
       const nb = name.box;
 
-      const x = Math.max(nb.x - 10, 18);
-      const w = Math.max(nb.width + 20, 150);
+      const left = Math.max(nb.x - 10, 18);
+      const width = Math.max(nb.width + 20, 150);
 
-      const topY = lb.y - lb.height - 6;
-      const bottomY = nb.y + nb.height * 0.45;
-      const rawHeight = topY - bottomY;
-      const h = Math.min(Math.max(rawHeight, 38), 82);
-      const y = bottomY;
+      // pdf.js text coordinates use a bottom-left style origin.
+      // Convert the detected label-name gap into a TOP-BASED box
+      // so preview and final PDF placement use the same meaning.
+      const labelBottom = pi.height - lb.y;
+      const nameTop = pi.height - (nb.y + nb.height);
 
-      const xPercent = clamp01(x / pi.width);
-      const yPercent = clamp01((pi.height - (y + h)) / pi.height);
-      const widthPercent = clamp01(w / pi.width);
-      const heightPercent = clamp01(h / pi.height);
+      const top = Math.max(labelBottom + 6, 0);
+      const bottom = Math.min(nameTop + nb.height * 0.55, pi.height);
+
+      let height = bottom - top;
+
+      // Force a usable signature height while staying anchored to the name block.
+      if (height < 38) {
+        height = 38;
+      }
+      if (height > 82) {
+        height = 82;
+      }
+
+      let finalTop = top;
+
+      // Keep lower edge near the printed name when forced height expands the box.
+      if (finalTop + height > bottom) {
+        finalTop = Math.max(bottom - height, 0);
+      }
+
+      // Ensure it doesn't collide too much with the label.
+      if (finalTop < top) {
+        finalTop = top;
+      }
+
+      const xPercent = clamp01(left / pi.width);
+      const yPercent = clamp01(finalTop / pi.height);
+      const widthPercent = clamp01(width / pi.width);
+      const heightPercent = clamp01(height / pi.height);
 
       return {
         found: true,
@@ -458,7 +483,10 @@ export default function SignDesk() {
       } catch (err) {
         console.error("AI/render error:", err);
 
-        const fallbackResult = findStrictLabelNamePlacement(doc);
+        const fallbackResult = findStrictLabelNamePlacement({
+          pageInfos: doc.pageInfos || [],
+        });
+
         if (fallbackResult) {
           updateDoc(doc.id, {
             aiResult: fallbackResult,
