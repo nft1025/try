@@ -385,8 +385,14 @@ export default function SignDesk() {
         }
 
         for (const pl of placements) {
-          const dims = embImg.scaleToFit(pl.w, pl.h);
-
+  // leave a little padding so the signature stays inside the box
+          const padX = 6;
+          const padY = 4;
+          const fitW = Math.max(pl.w - padX * 2, 20);
+          const fitH = Math.max(pl.h - padY * 2, 20);
+        
+          const dims = embImg.scaleToFit(fitW, fitH);
+        
           pl.page.drawImage(embImg, {
             x: pl.x + (pl.w - dims.width) / 2,
             y: pl.y + (pl.h - dims.height) / 2,
