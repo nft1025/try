@@ -27,7 +27,7 @@ const AI_PROMPT = `You are analyzing document page images to find ALL locations 
 
 PRIMARY PATTERN — Signature above a name (most important):
 Look for any block that follows this layout top to bottom:
-1. A label like "Regards,", "For Approval:", "Approved By:","APPROVED BY", "Noted By:", "Certified by:", "Prepared by:", "Authorized by:", "Submitted by:", or any role/title label
+1. A label like "Regards,", "For Approval:", "Approved By:", "Noted By:", "Certified by:", "Prepared by:", "Authorized by:", "Submitted by:", or any role/title label
 2. A blank space OR a horizontal line (the actual signature line)
 3. A printed name (e.g. "Neil Francis A. Teresa", "Juan dela Cruz")
 
@@ -62,17 +62,37 @@ function parseAIResponse(raw) {
   // 2. Direct parse
   try { return JSON.parse(cleaned); } catch (_) {}
 
-  // 3. Extract JSON object with regex
-  const match = cleaned.match(/\{[\s\S]*\}/);
-  if (match) { try { return JSON.parse(match[0]); } catch (_) {} }
+  // 3. Extract JSON block
+  const startIdx = cleaned.indexOf('{');
+  if (startIdx !== -1) {
+    let jsonStr = cleaned.slice(startIdx);
 
-  // 4. Fix common AI mistakes: single quotes, trailing commas, unquoted keys
+    // Try direct parse of extracted block
+    try { return JSON.parse(jsonStr); } catch (_) {}
+
+    // Auto-close truncated JSON
+    try {
+      let fixed = jsonStr;
+      // Remove trailing comma
+      fixed = fixed.replace(/,\s*$/, '');
+      // Close open string if reasoning was cut off
+      const quoteCount = (fixed.match(/"/g) || []).length;
+      if (quoteCount % 2 !== 0) fixed += '"';
+      // Close open arrays and objects
+      const openBrackets = (fixed.match(/\[/g) || []).length - (fixed.match(/\]/g) || []).length;
+      const openBraces = (fixed.match(/\{/g) || []).length - (fixed.match(/\}/g) || []).length;
+      for (let i = 0; i < openBrackets; i++) fixed += ']';
+      for (let i = 0; i < openBraces; i++) fixed += '}';
+      return JSON.parse(fixed);
+    } catch (_) {}
+  }
+
+  // 4. Fix common AI mistakes
   try {
     const fixed = cleaned
       .replace(/'/g, '"')
       .replace(/,\s*}/g, "}")
-      .replace(/,\s*]/g, "]")
-      .replace(/([{,]\s*)(\w+)\s*:/g, '$1"$2":');
+      .replace(/,\s*]/g, "]");
     return JSON.parse(fixed);
   } catch (_) {}
 
@@ -132,7 +152,7 @@ export default function SignDesk() {
     if (!doc.open && !doc.previewRendered && doc.status !== "signed") {
       renderAndAnalyze(doc);
     }
-  }, []);
+  }, [renderAndAnalyze]);
 
   const renderAndAnalyze = useCallback(async (doc) => {
     if (doc.previewRendered) return;
@@ -172,7 +192,7 @@ export default function SignDesk() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model: "claude-sonnet-4-20250514",
-          max_tokens: 2000,
+          max_tokens: 4000,
           messages: [{
             role: "user",
             content: [
@@ -247,8 +267,7 @@ export default function SignDesk() {
           const sigW = loc.width_percent * width;
           const sigH = Math.max(loc.height_percent * height, 36);
           const sigX = loc.x_percent * width;
-          const sigY = height - (loc.y_percent + loc.height_percent) * height;
-
+          const sigY = height - (loc.y_percent + loc.height_percent) * height + 40;
           placements.push({ page: targetPage, x: sigX, y: Math.max(sigY, 4), w: sigW, h: sigH });
         }
       }
