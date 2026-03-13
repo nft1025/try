@@ -371,7 +371,8 @@ export default function SignDesk() {
           const boxW = loc.width_percent * width;
           const boxH = Math.max(loc.height_percent * height, 36);
           const boxX = loc.x_percent * width;
-          const boxY = height - (loc.y_percent * height) - boxH;
+          const OFFSET = 60; // increase to move signature UP
+          const boxY = height - (loc.y_percent * height) - boxH + OFFSET;
 
           placements.push({ page: targetPage, x: boxX, y: Math.max(boxY, 0), w: boxW, h: boxH });
         }
