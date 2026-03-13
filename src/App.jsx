@@ -74,12 +74,14 @@ function parseAIResponse(raw) {
 
 function normalizeText(s = "") { return s.replace(/\s+/g, " ").trim(); }
 
-function getTextItemBox(item) {
+function getTextItemBox(item, scale) {
+  // pdf.js text transforms are in PDF points (unscaled)
+  // multiply by viewport scale so coords match the canvas dimensions
   const tx = item.transform || [];
-  const x = tx[4] || 0;
-  const y = tx[5] || 0;
-  const width = item.width || 0;
-  const height = Math.abs(tx[3] || item.height || 12) || 12;
+  const x = (tx[4] || 0) * scale;
+  const y = (tx[5] || 0) * scale;
+  const width = (item.width || 0) * scale;
+  const height = Math.abs(tx[3] || item.height || 12) * scale || 12;
   return { x, y, width, height };
 }
 
@@ -111,7 +113,7 @@ function findStrictLabelNamePlacement(doc) {
 
   for (const pi of pages) {
     const items = (pi.textItems || [])
-      .map(it => ({ ...it, str: normalizeText(it.str || ""), box: getTextItemBox(it) }))
+      .map(it => ({ ...it, str: normalizeText(it.str || ""), box: getTextItemBox(it, pi.scale || 1.5) }))
       .filter(it => it.str);
 
     if (!items.length) continue;
@@ -144,26 +146,27 @@ function findStrictLabelNamePlacement(doc) {
       const left = Math.max(nb.x - 10, 18);
       const width = Math.max(nb.width + 20, 150);
 
-      // pdf.js text items: y is the BASELINE from bottom of page (PDF coords)
-      // lb.y = label baseline (from bottom), nb.y = name baseline (from bottom)
-      // label is ABOVE name visually, so lb.y > nb.y in PDF coords
+      // After scaling, all coordinates are in canvas pixels (top-left origin for canvas,
+      // but pdf.js text y is from BOTTOM of page scaled to canvas size)
+      // lb.y and nb.y are now in canvas-scaled units, measured from bottom
 
-      // Signature box goes between label bottom and name top
-      // In PDF coords (bottom-up): from nb.y + nb.height (name top) up to lb.y (label baseline)
-      const nameTopPdf   = nb.y + nb.height;        // top of name in PDF coords
-      const labelBasePdf = lb.y;                     // label baseline in PDF coords
+      // Name is visually BELOW label → nb.y < lb.y (lower y = lower on page in PDF bottom-up)
+      // Signature box top (canvas) = canvas_height - lb.y  (just below label)
+      // Signature box bottom (canvas) = canvas_height - nb.y  (just above name)
 
-      // Clamp to a usable range
-      let boxBottomPdf = nameTopPdf - 2;             // just above the name
-      let boxTopPdf    = labelBasePdf - 4;           // just below the label
+      const canvasLabelBottom = pi.height - lb.y;   // pixels from top of canvas to bottom of label
+      const canvasNameTop     = pi.height - (nb.y + nb.height); // pixels from top to top of name
 
-      let boxHeight = boxTopPdf - boxBottomPdf;
-      if (boxHeight < 38) { boxHeight = 38; boxBottomPdf = boxTopPdf - boxHeight; }
-      if (boxHeight > 82) { boxHeight = 82; boxBottomPdf = boxTopPdf - boxHeight; }
+      let boxTop    = canvasLabelBottom + 4;         // just below label
+      let boxBottom = canvasNameTop - 2;             // just above name top
 
-      // Convert to percent — PDF coords are already in page units
+      let boxHeight = boxBottom - boxTop;
+      if (boxHeight < 38) { boxHeight = 38; boxTop = boxBottom - boxHeight; }
+      if (boxHeight > 90) { boxHeight = 90; boxTop = boxBottom - boxHeight; }
+      if (boxTop < 0) boxTop = 0;
+
       const xPercent      = clamp01(left / pi.width);
-      const yPercent      = clamp01(1 - boxTopPdf / pi.height);   // canvas top-down
+      const yPercent      = clamp01(boxTop / pi.height);        // canvas top-down → direct percent
       const widthPercent  = clamp01(width / pi.width);
       const heightPercent = clamp01(boxHeight / pi.height);
 
@@ -257,7 +260,7 @@ export default function SignDesk() {
           }));
         } catch (_) {}
 
-        pageInfos.push({ pageNum: p, canvas, width: vp.width, height: vp.height, textItems });
+        pageInfos.push({ pageNum: p, canvas, width: vp.width, height: vp.height, textItems, scale: 1.5 });
       }
 
       updateDoc(doc.id, { pageInfos, status: "pending" });
